@@ -4,7 +4,7 @@
 一个[Astrbot](https://github.com/Soulter/AstrBot)插件，可以接入newapi的视频模型，实现文生视频和图生视频功能。
 
 ## 📦安装
-通过astrbot自带插件商店搜索`astrbot_plugin_sora`一键安装。
+通过astrbot自带插件商店搜索`astrbot_plugin_sora2`一键安装。
 
 ## ⚙配置
 
