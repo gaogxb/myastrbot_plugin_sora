@@ -15,14 +15,14 @@ from astrbot.api.event import MessageChain, AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Reply, Video
 
-@register("astrbot_plugin_sora", "CCYellowStar2", "使用newAPI生成视频。指令 文生视频 <提示词> 或 图生视频 <提示词> + 图片", "1.0")
+@register("astrbot_plugin_sora", "gaogxb", "使用newAPI生成视频。指令 文生视频 <提示词> 或 图生视频 <提示词> + 图片", "1.0")
 class ApiVideoPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
         self.api_key = config.get("api_key", "")
-        self.api_url = config.get("api_url", "https://apis.kuai.host/v1/chat/completions")
-        self.model = config.get("model", "sora-2-hd")
+        self.api_url = config.get("api_url", "https://grsai.dakka.com.cn/v1/video/sora-video")
+        self.model = config.get("model", "sora-2")
         self.session = aiohttp.ClientSession()
         
     async def terminate(self):
@@ -44,8 +44,7 @@ class ApiVideoPlugin(Star):
             return
 
         yield event.plain_result("收到文生视频请求，生成中请稍候...")
-        content_list = [{"type": "text", "text": user_prompt}]
-        payload = self._build_payload(content_list)
+        payload = self._build_payload(user_prompt)
         
         await self._generate_and_send_video(event, payload)
 
@@ -68,96 +67,155 @@ class ApiVideoPlugin(Star):
         if not user_prompt:
             user_prompt = "让画面动起来"
         
-        # 修改点 3: 改进用户反馈，告知收到了多少张图片
+        # 改进用户反馈，告知收到了多少张图片
         yield event.plain_result(f"收到图生视频请求，共计 {len(image_list)} 张图片，生成中请稍候...")
         
-        # 修改点 4: 构建包含所有图片的 content_list
-        # 首先添加文本部分
-        content_list = [{"type": "text", "text": user_prompt}]
+        # sora2 API 只支持一张参考图，使用第一张图片
+        image_bytes = image_list[0]
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        # sora2 支持 base64 格式，格式为: data:image/png;base64,{base64_string}
+        image_url = f"data:image/png;base64,{base64_image}"
         
-        # 然后遍历所有图片，为每一张图片创建一个 image_url 对象并添加
-        for image_bytes in image_list:
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
-            image_payload_part = {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{base64_image}"}
-            }
-            content_list.append(image_payload_part)
-        
-        payload = self._build_payload(content_list)
+        payload = self._build_payload(user_prompt, image_url)
         await self._generate_and_send_video(event, payload)
 
-    def _build_payload(self, content_list: List[dict]) -> dict:
-        return {
-           "model": self.model,
-           "max_tokens": 1000,
-           "messages": [
-              {
-                 "role": "user",
-                 "content": content_list
-              }
-           ]
+    def _build_payload(self, prompt: str, image_url: str = None) -> dict:
+        """构建 sora2 API 请求参数"""
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "aspectRatio": self.config.get("aspectRatio", "16:9"),
+            "duration": self.config.get("duration", 10),
+            "size": self.config.get("size", "small"),
+            "shutProgress": self.config.get("shutProgress", False)
         }
+        
+        # 如果有参考图，添加到 url 字段
+        if image_url:
+            payload["url"] = image_url
+        
+        return payload
 
     async def _generate_and_send_video(self, event: AstrMessageEvent, payload: dict):
-        headers = {'Accept': 'application/json', 'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
+        """使用 sora2 API 生成视频（流式响应）"""
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
         try:
             async with self.session.post(self.api_url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    content_type = response.headers.get('Content-Type', '').lower()
+                    # sora2 使用流式响应，每行是一个 JSON 对象（不是 SSE 格式，没有 data: 前缀）
+                    video_url = None
+                    last_progress = 0
+                    task_id = None
                     
-                    # 检查是否为流式响应 (Server-Sent Events)
-                    if 'text/event-stream' in content_type or 'event-stream' in content_type:
-                        # 处理流式响应
-                        content = ""
-                        buffer = ""
-                        async for chunk in response.content.iter_chunked(1024):
-                            buffer += chunk.decode('utf-8', errors='ignore')
-                            # 按行处理缓冲区中的数据
-                            while '\n' in buffer:
-                                line, buffer = buffer.split('\n', 1)
-                                line_str = line.strip()
-                                if line_str.startswith('data: '):
-                                    try:
-                                        # 提取 data: 后面的 JSON 数据
-                                        json_str = line_str[6:]  # 去掉 'data: ' 前缀
-                                        if json_str and json_str != '[DONE]':
-                                            data = json.loads(json_str)
-                                            # 从流式数据中提取 content
-                                            delta = data.get("choices", [{}])[0].get("delta", {})
-                                            if "content" in delta:
-                                                content += delta["content"]
-                                    except Exception as e:
-                                        logger.debug(f"解析流式数据行时出错: {e}, 行内容: {line_str}")
-                                        continue
-                    else:
-                        # 处理普通 JSON 响应
-                        data = await response.json()
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    buffer = ""
+                    async for chunk in response.content.iter_chunked(1024):
+                        buffer += chunk.decode('utf-8', errors='ignore')
+                        # 按行处理缓冲区中的数据
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            line_str = line.strip()
+                            if not line_str:
+                                continue
+                            
+                            try:
+                                # 每行是直接的 JSON 对象
+                                data = json.loads(line_str)
+                                logger.debug(f"解析到流式数据: {json.dumps(data, ensure_ascii=False)[:200]}")
+                                
+                                # 获取任务 ID
+                                if "id" in data and not task_id:
+                                    task_id = data["id"]
+                                    logger.info(f"任务 ID: {task_id}")
+                                
+                                # 检查状态
+                                status = data.get("status", "")
+                                progress = data.get("progress", 0)
+                                
+                                # 更新进度（每 10% 更新一次，避免消息过多）
+                                if progress > last_progress + 10:
+                                    last_progress = progress
+                                    logger.info(f"视频生成进度: {progress}%")
+                                
+                                # 检查是否成功
+                                if status == "succeeded":
+                                    results = data.get("results", [])
+                                    if results and len(results) > 0:
+                                        video_url = results[0].get("url")
+                                        if video_url:
+                                            logger.info(f"成功获取视频链接: {video_url}")
+                                            # 发送视频
+                                            await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                                            logger.info("已成功向框架提交视频URL。")
+                                            return
+                                        else:
+                                            logger.warning("results 中没有 url 字段")
+                                    else:
+                                        logger.warning("results 为空")
+                                
+                                # 检查是否失败
+                                elif status == "failed":
+                                    failure_reason = data.get("failure_reason", "")
+                                    error = data.get("error", "")
+                                    error_msg = f"视频生成失败: {failure_reason}"
+                                    if error:
+                                        error_msg += f" - {error}"
+                                    logger.error(error_msg)
+                                    await self.context.send_message(
+                                        event.unified_msg_origin, 
+                                        MessageChain().message(error_msg)
+                                    )
+                                    return
+                                
+                            except json.JSONDecodeError as e:
+                                logger.debug(f"JSON解析失败: {e}, 行内容: {line_str[:100]}")
+                                continue
+                            except Exception as e:
+                                logger.debug(f"解析流式数据行时出错: {e}, 行内容: {line_str[:100]}")
+                                continue
                     
-                    # 仍然使用正则提取视频链接
-                    match = re.search(r'\(([^)]+\.mp4)\)', content)
-                    if match:
-                        video_url = match.group(1)
-                        logger.info(f"成功提取视频链接: {video_url}，尝试直接使用URL发送...")
-                        
-                        # 直接调用 Video.fromURL 发送
-                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
-                        logger.info("已成功向框架提交视频URL。")
-                        
-                    else:
-                        error_msg = f"未能从API响应中提取视频链接。响应内容: {content}"
+                    # 处理缓冲区中剩余的数据
+                    if buffer.strip():
+                        try:
+                            data = json.loads(buffer.strip())
+                            status = data.get("status", "")
+                            if status == "succeeded":
+                                results = data.get("results", [])
+                                if results and len(results) > 0:
+                                    video_url = results[0].get("url")
+                                    if video_url:
+                                        logger.info(f"成功获取视频链接: {video_url}")
+                                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                                        logger.info("已成功向框架提交视频URL。")
+                                        return
+                        except:
+                            pass
+                    
+                    # 如果流式处理完成但没有获取到视频链接
+                    if not video_url:
+                        error_msg = "未能从流式响应中获取视频链接，请检查日志"
                         logger.error(error_msg)
-                        await self.context.send_message(event.unified_msg_origin, MessageChain().message(error_msg))
+                        await self.context.send_message(
+                            event.unified_msg_origin, 
+                            MessageChain().message(error_msg)
+                        )
                 else:
                     error_text = await response.text()
                     error_msg = f"API请求失败，状态码: {response.status}, 响应: {error_text}"
                     logger.error(error_msg)
-                    await self.context.send_message(event.unified_msg_origin, MessageChain().message(error_msg))
+                    await self.context.send_message(
+                        event.unified_msg_origin, 
+                        MessageChain().message(error_msg)
+                    )
 
         except Exception as e:
             logger.error(f"视频生成过程中发生严重错误: {e}", exc_info=True)
-            await self.context.send_message(event.unified_msg_origin, MessageChain().message(f"生成失败: {str(e)}"))
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(f"生成失败: {str(e)}")
+            )
 
         
     async def get_images(self, event: AstrMessageEvent) -> list[bytes]:

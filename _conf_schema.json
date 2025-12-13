@@ -3,7 +3,7 @@
         "description": "API的请求地址",
         "type": "string",
         "hint": "指定视频生成服务的API接口地址",
-        "default": "https://apis.kuai.host/v1/chat/completions",
+        "default": "https://grsai.dakka.com.cn/v1/video/sora-video",
         "obvious_hint": false
     },
     "api_key": {
@@ -16,8 +16,36 @@
     "model": {
         "description": "视频生成模型名称",
         "type": "string",
-        "hint": "指定要使用的视频生成模型",
-        "default": "sora-2-hd",
+        "hint": "指定要使用的视频生成模型，支持: sora-2",
+        "default": "sora-2",
+        "obvious_hint": false
+    },
+    "aspectRatio": {
+        "description": "输出视频比例",
+        "type": "string",
+        "hint": "支持的比例: 9:16, 16:9",
+        "default": "16:9",
+        "obvious_hint": false
+    },
+    "duration": {
+        "description": "视频时长(秒)",
+        "type": "number",
+        "hint": "支持的时长: 10, 15",
+        "default": 10,
+        "obvious_hint": false
+    },
+    "size": {
+        "description": "视频清晰度",
+        "type": "string",
+        "hint": "支持的清晰度: small, large",
+        "default": "small",
+        "obvious_hint": false
+    },
+    "shutProgress": {
+        "description": "关闭进度回复",
+        "type": "boolean",
+        "hint": "关闭进度回复，直接回复最终结果",
+        "default": false,
         "obvious_hint": false
     }
 }
