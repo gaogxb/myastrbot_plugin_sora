@@ -72,7 +72,7 @@ class ApiVideoPlugin(Star):
         
         # sora2 API 只支持一张参考图，使用第一张图片
         image_bytes = image_list[0]
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
         # sora2 支持 base64 格式，格式为: data:image/png;base64,{base64_string}
         image_url = f"data:image/png;base64,{base64_image}"
         
@@ -82,7 +82,7 @@ class ApiVideoPlugin(Star):
     def _build_payload(self, prompt: str, image_url: str = None) -> dict:
         """构建 sora2 API 请求参数"""
         payload = {
-            "model": self.model,
+           "model": self.model,
             "prompt": prompt,
             "aspectRatio": self.config.get("aspectRatio", "16:9"),
             "duration": self.config.get("duration", 10),
@@ -103,12 +103,56 @@ class ApiVideoPlugin(Star):
             'Authorization': f'Bearer {self.api_key}'
         }
         try:
+            logger.info(f"发送请求到: {self.api_url}")
+            logger.debug(f"请求参数: {json.dumps(payload, ensure_ascii=False)}")
             async with self.session.post(self.api_url, headers=headers, json=payload) as response:
+                logger.info(f"响应状态码: {response.status}")
+                content_type = response.headers.get('Content-Type', '').lower()
+                logger.info(f"响应 Content-Type: {content_type}")
+                
                 if response.status == 200:
+                    # 检查是否为流式响应
+                    is_stream = 'text/event-stream' in content_type or 'stream' in content_type or 'application/x-ndjson' in content_type
+                    
+                    # 如果不是流式响应，尝试直接读取 JSON
+                    if not is_stream:
+                        logger.info("检测到非流式响应，尝试直接解析 JSON")
+                        try:
+                            data = await response.json()
+                            logger.info(f"接收到 JSON 数据: {json.dumps(data, ensure_ascii=False)[:300]}")
+                            
+                            status = data.get("status", "")
+                            if status == "succeeded":
+                                results = data.get("results", [])
+                                if results and len(results) > 0:
+                                    video_url = results[0].get("url")
+                                    if video_url:
+                                        logger.info(f"成功获取视频链接: {video_url}")
+                                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                                        logger.info("已成功向框架提交视频URL。")
+                                        return
+                            elif status == "failed":
+                                failure_reason = data.get("failure_reason", "")
+                                error = data.get("error", "")
+                                error_msg = f"视频生成失败: {failure_reason}"
+                                if error:
+                                    error_msg += f" - {error}"
+                                logger.error(error_msg)
+                                await self.context.send_message(
+                                    event.unified_msg_origin, 
+                                    MessageChain().message(error_msg)
+                                )
+                                return
+                        except Exception as e:
+                            logger.error(f"解析 JSON 响应失败: {e}")
+                            # 继续尝试流式处理
+                    
+                    # 流式响应处理
                     # sora2 使用流式响应，每行是一个 JSON 对象（不是 SSE 格式，没有 data: 前缀）
                     video_url = None
                     last_progress = 0
                     task_id = None
+                    received_lines = []  # 用于调试
                     
                     buffer = ""
                     async for chunk in response.content.iter_chunked(1024):
@@ -121,9 +165,21 @@ class ApiVideoPlugin(Star):
                                 continue
                             
                             try:
-                                # 每行是直接的 JSON 对象
-                                data = json.loads(line_str)
-                                logger.debug(f"解析到流式数据: {json.dumps(data, ensure_ascii=False)[:200]}")
+                                # 记录原始行（前10行用于调试）
+                                if len(received_lines) < 10:
+                                    received_lines.append(line_str[:200])
+                                
+                                # 处理 SSE 格式（data: 开头）或直接 JSON
+                                json_str = line_str
+                                if line_str.startswith('data: '):
+                                    json_str = line_str[6:]  # 去掉 'data: ' 前缀
+                                    if json_str == '[DONE]':
+                                        logger.info("收到流式响应结束标记 [DONE]")
+                                        continue
+                                
+                                # 解析 JSON 对象
+                                data = json.loads(json_str)
+                                logger.info(f"解析到流式数据: {json.dumps(data, ensure_ascii=False)[:300]}")
                                 
                                 # 获取任务 ID
                                 if "id" in data and not task_id:
@@ -187,19 +243,23 @@ class ApiVideoPlugin(Star):
                                     video_url = results[0].get("url")
                                     if video_url:
                                         logger.info(f"成功获取视频链接: {video_url}")
-                                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
-                                        logger.info("已成功向框架提交视频URL。")
+                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                        logger.info("已成功向框架提交视频URL。")
                                         return
                         except:
                             pass
-                    
+                        
                     # 如果流式处理完成但没有获取到视频链接
                     if not video_url:
-                        error_msg = "未能从流式响应中获取视频链接，请检查日志"
+                        error_msg = "未能从流式响应中获取视频链接"
                         logger.error(error_msg)
+                        if received_lines:
+                            logger.error(f"接收到的原始数据示例（前{min(10, len(received_lines))}行）: {received_lines}")
+                        else:
+                            logger.error("未接收到任何数据行")
                         await self.context.send_message(
                             event.unified_msg_origin, 
-                            MessageChain().message(error_msg)
+                            MessageChain().message(f"{error_msg}，请检查日志或联系管理员")
                         )
                 else:
                     error_text = await response.text()
