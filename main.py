@@ -15,7 +15,7 @@ from astrbot.api.event import MessageChain, AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Reply, Video
 
-@register("myastrbot_plugin_sora", "gaogxb", "使用newAPI生成视频。指令 文生视频 <提示词> 或 图生视频 <提示词> + 图片", "1.0.1")
+@register("myastrbot_plugin_sora", "gaogxb", "使用newAPI生成视频。指令 文生视频 <提示词> 或 图生视频 <提示词> + 图片", "1.0.4")
 class ApiVideoPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
