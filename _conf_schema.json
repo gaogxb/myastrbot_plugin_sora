@@ -43,9 +43,9 @@
     },
     "shutProgress": {
         "description": "关闭进度回复",
-        "type": "boolean",
+        "type": "string",
         "hint": "关闭进度回复，直接回复最终结果",
-        "default": false,
-        "obvious_hint": false
+        "default": "false",
+        "obvious_hint": "false"
     }
 }
