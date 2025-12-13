@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import random
 import re
 import asyncio
@@ -103,8 +104,36 @@ class ApiVideoPlugin(Star):
         try:
             async with self.session.post(self.api_url, headers=headers, json=payload) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    
+                    # 检查是否为流式响应 (Server-Sent Events)
+                    if 'text/event-stream' in content_type or 'event-stream' in content_type:
+                        # 处理流式响应
+                        content = ""
+                        buffer = ""
+                        async for chunk in response.content.iter_chunked(1024):
+                            buffer += chunk.decode('utf-8', errors='ignore')
+                            # 按行处理缓冲区中的数据
+                            while '\n' in buffer:
+                                line, buffer = buffer.split('\n', 1)
+                                line_str = line.strip()
+                                if line_str.startswith('data: '):
+                                    try:
+                                        # 提取 data: 后面的 JSON 数据
+                                        json_str = line_str[6:]  # 去掉 'data: ' 前缀
+                                        if json_str and json_str != '[DONE]':
+                                            data = json.loads(json_str)
+                                            # 从流式数据中提取 content
+                                            delta = data.get("choices", [{}])[0].get("delta", {})
+                                            if "content" in delta:
+                                                content += delta["content"]
+                                    except Exception as e:
+                                        logger.debug(f"解析流式数据行时出错: {e}, 行内容: {line_str}")
+                                        continue
+                    else:
+                        # 处理普通 JSON 响应
+                        data = await response.json()
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     
                     # 仍然使用正则提取视频链接
                     match = re.search(r'\(([^)]+\.mp4)\)', content)
