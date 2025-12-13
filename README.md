@@ -1,4 +1,4 @@
-# astrbot_plugin_sora
+# astrbot_plugin_sora2
 
 ## ✨ 简介
 一个[Astrbot](https://github.com/Soulter/AstrBot)插件，可以接入newapi的视频模型，实现文生视频和图生视频功能。
@@ -16,7 +16,7 @@
 | :-------- | :------------------- | :------------------------------------------- |
 | `api_url` | API的请求地址 | `https://apis.kuai.host/v1/chat/completions` |
 | `api_key` | 你的API服务商提供的密钥 | 无 |
-| `model` | 使用的视频生成模型 | `sora-2-hd` |
+| `model` | 使用的视频生成模型 | `sora-2` |
 
 
 ## ⌨️使用方法
