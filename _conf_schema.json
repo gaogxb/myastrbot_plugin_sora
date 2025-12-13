@@ -29,7 +29,7 @@
     },
     "duration": {
         "description": "视频时长(秒)",
-        "type": "number",
+        "type": "int",
         "hint": "支持的时长: 10, 15",
         "default": 10,
         "obvious_hint": false
