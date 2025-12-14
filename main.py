@@ -31,7 +31,7 @@ class ApiVideoPlugin(Star):
 
     @filter.regex(r"^(文生视频)", priority=3)
     async def handle_text_to_video(self, event: AstrMessageEvent):
-        user_prompt = re.sub(
+        input_text = re.sub(
             r"^(文生视频)\s*", "", event.message_obj.message_str, count=1
         ).strip()
 
@@ -39,18 +39,30 @@ class ApiVideoPlugin(Star):
             yield event.plain_result("错误：请先在配置文件中设置api_key")
             return
         
-        if not user_prompt:
+        # 检查是否有图片
+        image_list = await self.get_images(event)
+        image_url = None
+        if image_list:
+            # 如果有图片，转换为 base64
+            image_bytes = image_list[0]
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            image_url = f"data:image/png;base64,{base64_image}"
+        
+        # 解析输入参数（aspectRatio, remixTargetId）
+        user_prompt, aspect_ratio, remix_target_id = self._parse_input_params(input_text)
+        
+        if not user_prompt and not image_url:
             yield event.plain_result("请输入视频生成的提示词。用法: 文生视频 <提示词>")
             return
 
         yield event.plain_result("收到文生视频请求，生成中请稍候...")
-        payload = self._build_payload(user_prompt)
+        payload = self._build_payload(user_prompt, image_url, aspect_ratio, remix_target_id)
         
         await self._generate_and_send_video(event, payload)
 
     @filter.regex(r"^(图生视频)", priority=3)
     async def handle_image_to_video(self, event: AstrMessageEvent):
-        user_prompt = re.sub(
+        input_text = re.sub(
             r"^(图生视频)\s*", "", event.message_obj.message_str, count=1
         ).strip()
         
@@ -64,6 +76,9 @@ class ApiVideoPlugin(Star):
             yield event.plain_result("请提供一张或多张图片来生成视频。用法: 图生视频 <提示词> + 图片")
             return
 
+        # 解析输入参数（aspectRatio, remixTargetId）
+        user_prompt, aspect_ratio, remix_target_id = self._parse_input_params(input_text)
+
         if not user_prompt:
             user_prompt = "让画面动起来"
         
@@ -72,14 +87,41 @@ class ApiVideoPlugin(Star):
         
         # sora2 API 只支持一张参考图，使用第一张图片
         image_bytes = image_list[0]
-        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
         # sora2 支持 base64 格式，格式为: data:image/png;base64,{base64_string}
         image_url = f"data:image/png;base64,{base64_image}"
         
-        payload = self._build_payload(user_prompt, image_url)
+        payload = self._build_payload(user_prompt, image_url, aspect_ratio, remix_target_id)
         await self._generate_and_send_video(event, payload)
 
-    def _build_payload(self, prompt: str, image_url: str = None) -> dict:
+    def _parse_input_params(self, text: str) -> tuple[str, str | None, str | None]:
+        """
+        从输入文本中解析参数
+        返回: (清理后的提示词, aspectRatio, remixTargetId)
+        """
+        aspect_ratio = None
+        remix_target_id = None
+        
+        # 解析 aspectRatio: 9:16 或 16:9
+        if "9:16" in text:
+            aspect_ratio = "9:16"
+            text = text.replace("9:16", "").strip()
+        elif "16:9" in text:
+            aspect_ratio = "16:9"
+            text = text.replace("16:9", "").strip()
+        
+        # 解析 remixTargetId: s_ 后面跟10位以上的英文字母或数字
+        remix_match = re.search(r's_([a-zA-Z0-9]{10,})', text)
+        if remix_match:
+            remix_target_id = remix_match.group(0)  # 包含 s_ 前缀
+            text = text.replace(remix_target_id, "").strip()
+        
+        # 清理多余的空格
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text, aspect_ratio, remix_target_id
+    
+    def _build_payload(self, prompt: str, image_url: str = None, aspect_ratio: str = None, remix_target_id: str = None) -> dict:
         """构建 sora2 API 请求参数"""
         # 处理 shutProgress：如果是字符串 "true" 或 "false"，转换为布尔值
         shut_progress = self.config.get("shutProgress", False)
@@ -89,7 +131,7 @@ class ApiVideoPlugin(Star):
         payload = {
            "model": self.model,
             "prompt": prompt,
-            "aspectRatio": self.config.get("aspectRatio", "16:9"),
+            "aspectRatio": aspect_ratio if aspect_ratio else self.config.get("aspectRatio", "16:9"),
             "duration": self.config.get("duration", 10),
             "size": self.config.get("size", "small"),
             "shutProgress": shut_progress
@@ -98,6 +140,10 @@ class ApiVideoPlugin(Star):
         # 如果有参考图，添加到 url 字段
         if image_url:
             payload["url"] = image_url
+        
+        # 如果有 remixTargetId，添加到 payload
+        if remix_target_id:
+            payload["remixTargetId"] = remix_target_id
         
         return payload
 
@@ -110,8 +156,8 @@ class ApiVideoPlugin(Star):
         try:
             logger.info(f"发送请求到: {self.api_url}")
             logger.debug(f"请求参数: {json.dumps(payload, ensure_ascii=False)}")
-            # 设置超时时间（视频生成可能需要较长时间，设置为 5 分钟）
-            timeout = aiohttp.ClientTimeout(total=300)
+            # 设置超时时间（视频生成可能需要较长时间，设置为 8 分钟）
+            timeout = aiohttp.ClientTimeout(total=480)
             async with self.session.post(self.api_url, headers=headers, json=payload, timeout=timeout) as response:
                 logger.info(f"响应状态码: {response.status}")
                 content_type = response.headers.get('Content-Type', '').lower()
@@ -179,11 +225,19 @@ class ApiVideoPlugin(Star):
                                     results = data.get("results", [])
                                     if results and len(results) > 0:
                                         video_url = results[0].get("url")
+                                        pid = results[0].get("pid", "")
                                         if video_url:
                                             logger.info(f"成功获取视频链接: {video_url}")
                                             # 发送视频
                                             await event.send(event.chain_result([Video.fromURL(url=video_url)]))
                                             logger.info("已成功向框架提交视频URL。")
+                                            # 如果有 pid，也返回 pid
+                                            if pid:
+                                                logger.info(f"视频 PID: {pid}")
+                                                await self.context.send_message(
+                                                    event.unified_msg_origin,
+                                                    MessageChain().message(f"视频 PID: {pid}\n可用于视频续作（remix）")
+                                                )
                                             return
                                         else:
                                             logger.warning("results 中没有 url 字段")
@@ -225,10 +279,18 @@ class ApiVideoPlugin(Star):
                                     results = data.get("results", [])
                                     if results and len(results) > 0:
                                         video_url = results[0].get("url")
+                                        pid = results[0].get("pid", "")
                                         if video_url:
                                             logger.info(f"成功获取视频链接: {video_url}")
-                                            await event.send(event.chain_result([Video.fromURL(url=video_url)]))
-                                            logger.info("已成功向框架提交视频URL。")
+                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                        logger.info("已成功向框架提交视频URL。")
+                                            # 如果有 pid，也返回 pid
+                                            if pid:
+                                                logger.info(f"视频 PID: {pid}")
+                                                await self.context.send_message(
+                                                    event.unified_msg_origin,
+                                                    MessageChain().message(f"视频 PID: {pid}\n可用于视频续作（remix）")
+                                                )
                                             return
                         except Exception as e:
                             logger.debug(f"处理缓冲区剩余数据失败: {e}")
@@ -242,7 +304,7 @@ class ApiVideoPlugin(Star):
                         if received_lines:
                             logger.error(f"接收到的原始数据示例（前{min(10, len(received_lines))}行）: {received_lines}")
                             logger.error(f"缓冲区剩余内容: {buffer[:500] if buffer else '(空)'}")
-                        else:
+                    else:
                             logger.error("未接收到任何数据行")
                         await self.context.send_message(
                             event.unified_msg_origin, 
@@ -257,6 +319,20 @@ class ApiVideoPlugin(Star):
                         MessageChain().message(error_msg)
                     )
 
+        except asyncio.TimeoutError:
+            error_msg = "视频生成超时（8分钟），生成失败"
+            logger.error(error_msg)
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(error_msg)
+            )
+        except aiohttp.ServerTimeoutError:
+            error_msg = "视频生成超时（8分钟），生成失败"
+            logger.error(error_msg)
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(error_msg)
+            )
         except Exception as e:
             logger.error(f"视频生成过程中发生严重错误: {e}", exc_info=True)
             await self.context.send_message(

@@ -1,4 +1,4 @@
-# myastrbot_plugin_sora
+# myastrbot_plugin_soraV1.0.6
 
 ## ✨ 简介
 一个[Astrbot](https://github.com/Soulter/AstrBot)插件，可以接入newapi的视频模型，实现文生视频和图生视频功能。
