@@ -47,5 +47,26 @@
         "hint": "关闭进度回复，直接回复最终结果",
         "default": "false",
         "obvious_hint": "false"
+    },
+    "banana_api_url": {
+        "description": "Banana API的请求地址",
+        "type": "string",
+        "hint": "指定图片生成服务的API接口地址",
+        "default": "https://grsai.dakka.com.cn/v1/draw/nano-banana",
+        "obvious_hint": false
+    },
+    "banana_model": {
+        "description": "Banana图片生成模型名称",
+        "type": "string",
+        "hint": "指定要使用的图片生成模型，支持: nano-banana-fast, nano-banana, nano-banana-pro, nano-banana-pro-vt",
+        "default": "nano-banana-fast",
+        "obvious_hint": false
+    },
+    "banana_image_size": {
+        "description": "Banana图片大小",
+        "type": "string",
+        "hint": "输出图片大小，支持: 1K, 2K, 4K（仅nano-banana-pro支持）",
+        "default": "1K",
+        "obvious_hint": false
     }
 }

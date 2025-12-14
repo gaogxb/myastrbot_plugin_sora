@@ -15,7 +15,7 @@ from astrbot.api.event import MessageChain, AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Reply, Video
 
-@register("myastrbot_plugin_sora", "gaogxb", "使用newAPI生成视频。指令 文生视频 <提示词> 或 图生视频 <提示词> + 图片", "1.0.5")
+@register("myastrbot_plugin_sora", "gaogxb", "使用newAPI生成视频和图片。指令 文生视频/图生视频/文生图/图生图 <提示词>", "1.0.5")
 class ApiVideoPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -23,6 +23,10 @@ class ApiVideoPlugin(Star):
         self.api_key = config.get("api_key", "")
         self.api_url = config.get("api_url", "https://grsai.dakka.com.cn/v1/video/sora-video")
         self.model = config.get("model", "sora-2")
+        # Banana API 配置
+        self.banana_api_url = config.get("banana_api_url", "https://grsai.dakka.com.cn/v1/draw/nano-banana")
+        self.banana_model = config.get("banana_model", "nano-banana-fast")
+        self.banana_image_size = config.get("banana_image_size", "1K")
         self.session = aiohttp.ClientSession()
         
     async def terminate(self):
@@ -83,20 +87,92 @@ class ApiVideoPlugin(Star):
             user_prompt = "让画面动起来"
         
         # 改进用户反馈，告知收到了多少张图片
-        yield event.plain_result(f"收到图生视频请求，共计 {len(image_list)} 张图片，生成中请稍候...")
+        if len(image_list) >= 2:
+            yield event.plain_result(f"收到图生视频请求，共计 {len(image_list)} 张图片，因为用的是便宜的API所以仅支持一张图片，将使用第一张图片，生成中请稍候...")
+        else:
+            yield event.plain_result(f"收到图生视频请求，共计 {len(image_list)} 张图片，生成中请稍候...")
         
         # sora2 API 只支持一张参考图，使用第一张图片
         image_bytes = image_list[0]
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
         # sora2 支持 base64 格式，格式为: data:image/png;base64,{base64_string}
         image_url = f"data:image/png;base64,{base64_image}"
         
         payload = self._build_payload(user_prompt, image_url, aspect_ratio, remix_target_id)
         await self._generate_and_send_video(event, payload)
 
+    @filter.regex(r"^(文生图)", priority=3)
+    async def handle_text_to_image(self, event: AstrMessageEvent):
+        """文本生成图片（使用 banana API）"""
+        input_text = re.sub(
+            r"^(文生图)\s*", "", event.message_obj.message_str, count=1
+        ).strip()
+
+        if not self.api_key:
+            yield event.plain_result("错误：请先在配置文件中设置api_key")
+            return
+        
+        # 检查是否有图片
+        image_list = await self.get_images(event)
+        image_urls = []
+        if image_list:
+            # 如果有图片，转换为 base64 数组
+            for image_bytes in image_list:
+                base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                image_urls.append(f"data:image/png;base64,{base64_image}")
+        
+        # 解析输入参数（aspectRatio, imageSize）
+        user_prompt, aspect_ratio, image_size = self._parse_banana_params(input_text)
+        
+        if not user_prompt and not image_urls:
+            yield event.plain_result("请输入图片生成的提示词。用法: 文生图 <提示词>")
+            return
+
+        yield event.plain_result("收到文生图请求，生成中请稍候...")
+        payload = self._build_banana_payload(user_prompt, image_urls, aspect_ratio, image_size)
+        
+        await self._generate_and_send_image(event, payload)
+
+    @filter.regex(r"^(图生图)", priority=3)
+    async def handle_image_to_image(self, event: AstrMessageEvent):
+        """图片生成图片（使用 banana API）"""
+        input_text = re.sub(
+            r"^(图生图)\s*", "", event.message_obj.message_str, count=1
+        ).strip()
+        
+        if not self.api_key:
+            yield event.plain_result("错误：请先在配置文件中设置api_key")
+            return
+            
+        image_list = await self.get_images(event)
+        if not image_list:
+            yield event.plain_result("请提供一张或多张图片来生成图片。用法: 图生图 <提示词> + 图片")
+            return
+
+        # 解析输入参数（aspectRatio, imageSize）
+        user_prompt, aspect_ratio, image_size = self._parse_banana_params(input_text)
+
+        if not user_prompt:
+            user_prompt = "优化这张图片"
+        
+        # 改进用户反馈
+        if len(image_list) >= 2:
+            yield event.plain_result(f"收到图生图请求，共计 {len(image_list)} 张图片，将使用所有图片，生成中请稍候...")
+        else:
+            yield event.plain_result(f"收到图生图请求，共计 {len(image_list)} 张图片，生成中请稍候...")
+        
+        # banana API 支持多张图片，转换为 base64 数组
+        image_urls = []
+        for image_bytes in image_list:
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            image_urls.append(f"data:image/png;base64,{base64_image}")
+        
+        payload = self._build_banana_payload(user_prompt, image_urls, aspect_ratio, image_size)
+        await self._generate_and_send_image(event, payload)
+
     def _parse_input_params(self, text: str) -> tuple[str, str | None, str | None]:
         """
-        从输入文本中解析参数
+        从输入文本中解析参数（用于 sora 视频生成）
         返回: (清理后的提示词, aspectRatio, remixTargetId)
         """
         aspect_ratio = None
@@ -121,6 +197,38 @@ class ApiVideoPlugin(Star):
         
         return text, aspect_ratio, remix_target_id
     
+    def _parse_banana_params(self, text: str) -> tuple[str, str | None, str | None]:
+        """
+        从输入文本中解析参数（用于 banana 图片生成）
+        返回: (清理后的提示词, aspectRatio, imageSize)
+        """
+        aspect_ratio = None
+        image_size = None
+        
+        # 解析 aspectRatio: 支持 banana 的所有比例
+        banana_ratios = ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "21:9"]
+        for ratio in banana_ratios:
+            if ratio in text:
+                aspect_ratio = ratio
+                text = text.replace(ratio, "").strip()
+                break
+        
+        # 解析 imageSize: 1K, 2K, 4K
+        if "4K" in text:
+            image_size = "4K"
+            text = text.replace("4K", "").strip()
+        elif "2K" in text:
+            image_size = "2K"
+            text = text.replace("2K", "").strip()
+        elif "1K" in text:
+            image_size = "1K"
+            text = text.replace("1K", "").strip()
+        
+        # 清理多余的空格
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text, aspect_ratio, image_size
+    
     def _build_payload(self, prompt: str, image_url: str = None, aspect_ratio: str = None, remix_target_id: str = None) -> dict:
         """构建 sora2 API 请求参数"""
         # 处理 shutProgress：如果是字符串 "true" 或 "false"，转换为布尔值
@@ -144,6 +252,36 @@ class ApiVideoPlugin(Star):
         # 如果有 remixTargetId，添加到 payload
         if remix_target_id:
             payload["remixTargetId"] = remix_target_id
+        
+        return payload
+    
+    def _build_banana_payload(self, prompt: str, image_urls: List[str] = None, aspect_ratio: str = None, image_size: str = None) -> dict:
+        """构建 banana API 请求参数"""
+        # 处理 shutProgress：如果是字符串 "true" 或 "false"，转换为布尔值
+        shut_progress = self.config.get("shutProgress", False)
+        if isinstance(shut_progress, str):
+            shut_progress = shut_progress.lower() == "true"
+        
+        # 确定最终的 imageSize
+        final_image_size = image_size if image_size else self.banana_image_size
+        
+        # 如果 imageSize 是 4K，自动使用 nano-banana-pro 模型
+        model = self.banana_model
+        if final_image_size == "4K":
+            model = "nano-banana-pro"
+            logger.info(f"检测到 imageSize 为 4K，自动切换模型为 nano-banana-pro")
+        
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "aspectRatio": aspect_ratio if aspect_ratio else "auto",
+            "imageSize": final_image_size,
+            "shutProgress": shut_progress
+        }
+        
+        # 如果有参考图，添加到 urls 字段（数组格式）
+        if image_urls:
+            payload["urls"] = image_urls
         
         return payload
 
@@ -282,8 +420,8 @@ class ApiVideoPlugin(Star):
                                         pid = results[0].get("pid", "")
                                         if video_url:
                                             logger.info(f"成功获取视频链接: {video_url}")
-                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
-                        logger.info("已成功向框架提交视频URL。")
+                                            await event.send(event.chain_result([Video.fromURL(url=video_url)]))
+                                            logger.info("已成功向框架提交视频URL。")
                                             # 如果有 pid，也返回 pid
                                             if pid:
                                                 logger.info(f"视频 PID: {pid}")
@@ -304,7 +442,7 @@ class ApiVideoPlugin(Star):
                         if received_lines:
                             logger.error(f"接收到的原始数据示例（前{min(10, len(received_lines))}行）: {received_lines}")
                             logger.error(f"缓冲区剩余内容: {buffer[:500] if buffer else '(空)'}")
-                    else:
+                        else:
                             logger.error("未接收到任何数据行")
                         await self.context.send_message(
                             event.unified_msg_origin, 
@@ -335,6 +473,195 @@ class ApiVideoPlugin(Star):
             )
         except Exception as e:
             logger.error(f"视频生成过程中发生严重错误: {e}", exc_info=True)
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(f"生成失败: {str(e)}")
+            )
+
+    async def _generate_and_send_image(self, event: AstrMessageEvent, payload: dict):
+        """使用 banana API 生成图片（流式响应）"""
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
+        try:
+            logger.info(f"发送请求到: {self.banana_api_url}")
+            logger.debug(f"请求参数: {json.dumps(payload, ensure_ascii=False)}")
+            # 设置超时时间（图片生成可能需要较长时间，设置为 8 分钟）
+            timeout = aiohttp.ClientTimeout(total=480)
+            async with self.session.post(self.banana_api_url, headers=headers, json=payload, timeout=timeout) as response:
+                logger.info(f"响应状态码: {response.status}")
+                content_type = response.headers.get('Content-Type', '').lower()
+                logger.info(f"响应 Content-Type: {content_type}")
+                
+                if response.status == 200:
+                    # banana API 总是返回流式响应
+                    logger.info("开始处理流式响应，等待图片生成完成...")
+                    
+                    # 流式响应处理
+                    image_url = None
+                    last_progress = 0
+                    task_id = None
+                    received_lines = []
+                    
+                    buffer = ""
+                    chunk_count = 0
+                    async for chunk in response.content.iter_chunked(1024):
+                        chunk_count += 1
+                        if chunk_count % 10 == 0:
+                            logger.debug(f"已接收 {chunk_count} 个数据块，缓冲区大小: {len(buffer)}")
+                        buffer += chunk.decode('utf-8', errors='ignore')
+                        # 按行处理缓冲区中的数据
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            line_str = line.strip()
+                            if not line_str:
+                                continue
+                            
+                            try:
+                                # 记录原始行（前10行用于调试）
+                                if len(received_lines) < 10:
+                                    received_lines.append(line_str[:200])
+                                
+                                # 处理 SSE 格式（data: 开头）或直接 JSON
+                                json_str = line_str
+                                if line_str.startswith('data: '):
+                                    json_str = line_str[6:]
+                                    if json_str == '[DONE]':
+                                        logger.info("收到流式响应结束标记 [DONE]")
+                                        continue
+                                
+                                # 解析 JSON 对象
+                                data = json.loads(json_str)
+                                logger.info(f"解析到流式数据: {json.dumps(data, ensure_ascii=False)[:300]}")
+                                
+                                # 获取任务 ID
+                                if "id" in data and not task_id:
+                                    task_id = data["id"]
+                                    logger.info(f"任务 ID: {task_id}")
+                                
+                                # 检查状态
+                                status = data.get("status", "")
+                                progress = data.get("progress", 0)
+                                
+                                # 更新进度（每 10% 更新一次）
+                                if progress > last_progress + 10:
+                                    last_progress = progress
+                                    logger.info(f"图片生成进度: {progress}%")
+                                
+                                # 检查是否成功
+                                if status == "succeeded":
+                                    results = data.get("results", [])
+                                    if results and len(results) > 0:
+                                        image_url = results[0].get("url")
+                                        content = results[0].get("content", "")
+                                        if image_url:
+                                            logger.info(f"成功获取图片链接: {image_url}")
+                                            # 发送图片
+                                            await event.send(event.chain_result([Image.fromURL(url=image_url)]))
+                                            logger.info("已成功向框架提交图片URL。")
+                                            # 如果有 content，也返回内容
+                                            if content:
+                                                logger.info(f"图片内容描述: {content}")
+                                                await self.context.send_message(
+                                                    event.unified_msg_origin,
+                                                    MessageChain().message(f"内容: {content}")
+                                                )
+                                            return
+                                        else:
+                                            logger.warning("results 中没有 url 字段")
+                                    else:
+                                        logger.warning("results 为空")
+                                
+                                # 检查是否失败
+                                elif status == "failed":
+                                    failure_reason = data.get("failure_reason", "")
+                                    error = data.get("error", "")
+                                    error_msg = f"图片生成失败: {failure_reason}"
+                                    if error:
+                                        error_msg += f" - {error}"
+                                    logger.error(error_msg)
+                                    await self.context.send_message(
+                                        event.unified_msg_origin, 
+                                        MessageChain().message(error_msg)
+                                    )
+                                    return
+                                
+                            except json.JSONDecodeError as e:
+                                logger.debug(f"JSON解析失败: {e}, 行内容: {line_str[:100]}")
+                                continue
+                            except Exception as e:
+                                logger.debug(f"解析流式数据行时出错: {e}, 行内容: {line_str[:100]}")
+                                continue
+                    
+                    # 处理缓冲区中剩余的数据
+                    if buffer.strip():
+                        try:
+                            buffer_str = buffer.strip()
+                            if buffer_str.startswith('data: '):
+                                buffer_str = buffer_str[6:]
+                            if buffer_str and buffer_str != '[DONE]':
+                                data = json.loads(buffer_str)
+                                status = data.get("status", "")
+                                if status == "succeeded":
+                                    results = data.get("results", [])
+                                    if results and len(results) > 0:
+                                        image_url = results[0].get("url")
+                                        content = results[0].get("content", "")
+                                        if image_url:
+                                            logger.info(f"成功获取图片链接: {image_url}")
+                                            await event.send(event.chain_result([Image.fromURL(url=image_url)]))
+                                            logger.info("已成功向框架提交图片URL。")
+                                            if content:
+                                                logger.info(f"图片内容描述: {content}")
+                                                await self.context.send_message(
+                                                    event.unified_msg_origin,
+                                                    MessageChain().message(f"内容: {content}")
+                                                )
+                                            return
+                        except Exception as e:
+                            logger.debug(f"处理缓冲区剩余数据失败: {e}")
+                            pass
+                        
+                    # 如果流式处理完成但没有获取到图片链接
+                    if not image_url:
+                        error_msg = "未能从流式响应中获取图片链接"
+                        logger.error(error_msg)
+                        logger.error(f"共接收 {chunk_count} 个数据块，缓冲区剩余: {len(buffer)} 字符")
+                        if received_lines:
+                            logger.error(f"接收到的原始数据示例（前{min(10, len(received_lines))}行）: {received_lines}")
+                            logger.error(f"缓冲区剩余内容: {buffer[:500] if buffer else '(空)'}")
+                        else:
+                            logger.error("未接收到任何数据行")
+                        await self.context.send_message(
+                            event.unified_msg_origin, 
+                            MessageChain().message(f"{error_msg}，请检查日志或联系管理员")
+                        )
+                else:
+                    error_text = await response.text()
+                    error_msg = f"API请求失败，状态码: {response.status}, 响应: {error_text}"
+                    logger.error(error_msg)
+                    await self.context.send_message(
+                        event.unified_msg_origin, 
+                        MessageChain().message(error_msg)
+                    )
+
+        except asyncio.TimeoutError:
+            error_msg = "图片生成超时（8分钟），生成失败"
+            logger.error(error_msg)
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(error_msg)
+            )
+        except aiohttp.ServerTimeoutError:
+            error_msg = "图片生成超时（8分钟），生成失败"
+            logger.error(error_msg)
+            await self.context.send_message(
+                event.unified_msg_origin, 
+                MessageChain().message(error_msg)
+            )
+        except Exception as e:
+            logger.error(f"图片生成过程中发生严重错误: {e}", exc_info=True)
             await self.context.send_message(
                 event.unified_msg_origin, 
                 MessageChain().message(f"生成失败: {str(e)}")
