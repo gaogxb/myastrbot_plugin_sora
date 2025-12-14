@@ -118,41 +118,9 @@ class ApiVideoPlugin(Star):
                 logger.info(f"响应 Content-Type: {content_type}")
                 
                 if response.status == 200:
-                    # 检查是否为流式响应
-                    is_stream = 'text/event-stream' in content_type or 'stream' in content_type or 'application/x-ndjson' in content_type
-                    
-                    # 如果不是流式响应，尝试直接读取 JSON
-                    if not is_stream:
-                        logger.info("检测到非流式响应，尝试直接解析 JSON")
-                        try:
-                            data = await response.json()
-                            logger.info(f"接收到 JSON 数据: {json.dumps(data, ensure_ascii=False)[:300]}")
-                            
-                            status = data.get("status", "")
-                            if status == "succeeded":
-                                results = data.get("results", [])
-                                if results and len(results) > 0:
-                                    video_url = results[0].get("url")
-                                    if video_url:
-                                        logger.info(f"成功获取视频链接: {video_url}")
-                                        await event.send(event.chain_result([Video.fromURL(url=video_url)]))
-                                        logger.info("已成功向框架提交视频URL。")
-                                        return
-                            elif status == "failed":
-                                failure_reason = data.get("failure_reason", "")
-                                error = data.get("error", "")
-                                error_msg = f"视频生成失败: {failure_reason}"
-                                if error:
-                                    error_msg += f" - {error}"
-                                logger.error(error_msg)
-                                await self.context.send_message(
-                                    event.unified_msg_origin, 
-                                    MessageChain().message(error_msg)
-                                )
-                                return
-                        except Exception as e:
-                            logger.error(f"解析 JSON 响应失败: {e}")
-                            # 继续尝试流式处理
+                    # sora2 API 总是返回流式响应，即使 Content-Type 可能显示为 application/json
+                    # 直接使用流式处理，等待直到收到 succeeded 状态
+                    logger.info("开始处理流式响应，等待视频生成完成...")
                     
                     # 流式响应处理
                     # sora2 使用流式响应，每行是一个 JSON 对象（不是 SSE 格式，没有 data: 前缀）
@@ -162,7 +130,11 @@ class ApiVideoPlugin(Star):
                     received_lines = []  # 用于调试
                     
                     buffer = ""
+                    chunk_count = 0
                     async for chunk in response.content.iter_chunked(1024):
+                        chunk_count += 1
+                        if chunk_count % 10 == 0:  # 每10个chunk记录一次
+                            logger.debug(f"已接收 {chunk_count} 个数据块，缓冲区大小: {len(buffer)}")
                         buffer += chunk.decode('utf-8', errors='ignore')
                         # 按行处理缓冲区中的数据
                         while '\n' in buffer:
@@ -266,8 +238,10 @@ class ApiVideoPlugin(Star):
                     if not video_url:
                         error_msg = "未能从流式响应中获取视频链接"
                         logger.error(error_msg)
+                        logger.error(f"共接收 {chunk_count} 个数据块，缓冲区剩余: {len(buffer)} 字符")
                         if received_lines:
                             logger.error(f"接收到的原始数据示例（前{min(10, len(received_lines))}行）: {received_lines}")
+                            logger.error(f"缓冲区剩余内容: {buffer[:500] if buffer else '(空)'}")
                         else:
                             logger.error("未接收到任何数据行")
                         await self.context.send_message(
